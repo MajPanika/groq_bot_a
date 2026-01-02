@@ -6,6 +6,9 @@ from aiogram.enums import ParseMode
 from config import TELEGRAM_TOKEN
 from generation_service import GenerationService
 
+import logging
+logger = logging.getLogger("telegram")
+
 
 bot = Bot(
     token=TELEGRAM_TOKEN,
@@ -23,5 +26,8 @@ async def start(message: Message):
 
 @dp.message()
 async def handle_message(message: Message):
+    logger.info(
+        f"Message from {message.from_user.id}: {message.text[:50]}"
+    )
     response = GenerationService.generate(message.text)
     await message.answer(response)
