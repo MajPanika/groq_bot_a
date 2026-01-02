@@ -8,7 +8,7 @@ from memory_store import chat_store
 class GenerationService:
 
     @staticmethod
-def generate(text: str, chat_id: int) -> str:
+    def generate(text: str, chat_id: int) -> str:
     history = chat_store.get_messages(chat_id)
 
     messages = history + [
