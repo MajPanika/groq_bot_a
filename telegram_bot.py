@@ -9,12 +9,18 @@ from generation_service import GenerationService
 import logging
 logger = logging.getLogger("telegram")
 
+from memory_store import chat_store
 
 bot = Bot(
     token=TELEGRAM_TOKEN,
     parse_mode=ParseMode.MARKDOWN
 )
 dp = Dispatcher()
+
+@bot.message_handler(commands=["reset"])
+def reset_chat(message):
+    chat_store.clear(message.chat.id)
+    bot.reply_to(message, "Контекст этого диалога сброшен ✨")
 
 
 @dp.message(CommandStart())
