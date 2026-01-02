@@ -1,0 +1,27 @@
+from aiogram import Bot, Dispatcher
+from aiogram.types import Message
+from aiogram.filters import CommandStart
+from aiogram.enums import ParseMode
+
+from config import TELEGRAM_TOKEN
+from generation_service import GenerationService
+
+
+bot = Bot(
+    token=TELEGRAM_TOKEN,
+    parse_mode=ParseMode.MARKDOWN
+)
+dp = Dispatcher()
+
+
+@dp.message(CommandStart())
+async def start(message: Message):
+    await message.answer(
+        "Я живой 🤍\nНапиши что-нибудь."
+    )
+
+
+@dp.message()
+async def handle_message(message: Message):
+    response = GenerationService.generate(message.text)
+    await message.answer(response)
