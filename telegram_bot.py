@@ -6,6 +6,10 @@ from aiogram.enums import ParseMode
 from config import TELEGRAM_TOKEN
 from generation_service import GenerationService
 
+from aiogram import types
+from memory_store import chat_store
+from telegram_bot import dp  # твой Dispatcher
+
 import logging
 logger = logging.getLogger("telegram")
 
@@ -17,10 +21,13 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-@bot.message_handler(commands=["reset"])
-def reset_chat(message):
+@dp.message_handler(commands=["reset"])
+async def reset_chat(message: types.Message):
+    """
+    Очищает память текущего чата
+    """
     chat_store.clear(message.chat.id)
-    bot.reply_to(message, "Контекст этого диалога сброшен ✨")
+    await message.reply("Контекст этого диалога сброшен ✨")
 
 
 @dp.message(CommandStart())
