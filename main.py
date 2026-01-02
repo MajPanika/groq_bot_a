@@ -1,14 +1,20 @@
-# main.py
-
 import asyncio
-from logger import setup_logger
-from telegram_bot import bot, dp
+from telegram_bot import dp  # Dispatcher с хэндлерами уже подключен
 
-
-async def main():
-    setup_logger()
-    await dp.start_polling(bot)
-
-
+# =====================
+# Точка входа
+# =====================
 if __name__ == "__main__":
-    asyncio.run(main())
+    # asyncio.run нужен для асинхронного запуска aiogram
+    from aiogram import executor
+    from telegram_bot import bot
+
+    print("Бот запускается... 🤍")
+    try:
+        from aiogram import executor
+        executor.start_polling(dp, skip_updates=True)
+    except KeyboardInterrupt:
+        print("Бот остановлен вручную")
+    finally:
+        # Закрываем соединение бота корректно
+        asyncio.run(bot.session.close())
