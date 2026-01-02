@@ -29,5 +29,9 @@ async def handle_message(message: Message):
     logger.info(
         f"Message from {message.from_user.id}: {message.text[:50]}"
     )
-    response = GenerationService.generate(message.text)
+    response = GenerationService.generate(
+    text=message.text,
+    chat_id=message.chat.id
+    )
+
     await message.answer(response)
