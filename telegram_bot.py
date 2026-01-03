@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, types
@@ -10,30 +11,25 @@ from config import TELEGRAM_TOKEN
 from generation_service import GenerationService
 from memory_store import chat_store
 
-
-# -------------------------------------------------
-# logging
-# -------------------------------------------------
+# --------------------------------
+# Logger
+# --------------------------------
 logger = logging.getLogger("telegram")
+logging.basicConfig(level=logging.INFO)
 
-
-# -------------------------------------------------
-# bot / dispatcher
-# -------------------------------------------------
-bot = Bot(
-    token=TELEGRAM_TOKEN,
-    parse_mode=ParseMode.MARKDOWN
-)
+# --------------------------------
+# Bot/Dispatcher
+# --------------------------------
+bot = Bot(token=TELEGRAM_TOKEN, parse_mode=ParseMode.MARKDOWN)
 dp = Dispatcher()
 
-
-# -------------------------------------------------
-# styles
-# -------------------------------------------------
+# --------------------------------
+# Styles
+# --------------------------------
 SYSTEM_STYLES = {
     "default": {
         "title": "Обычный",
-        "system": "Ты полезный, дружелюбный и вменяемый ассистент."
+        "system": "Ты полезный и дружелюбный ассистент."
     },
     "creative": {
         "title": "Креативный",
@@ -45,20 +41,15 @@ SYSTEM_STYLES = {
     }
 }
 
+# --------------------------------
+# Helpers
+# --------------------------------
 
 def get_dialog_key(message: Message) -> str:
-    """
-    Уникальный ключ диалога:
-    chat_id + thread_id (если есть)
-    """
     thread_id = message.message_thread_id or 0
     return f"{message.chat.id}:{thread_id}"
 
-
 def resolve_style(style_meta: Optional[dict], user_id: int) -> str:
-    """
-    Возвращает system prompt по метаданным стиля
-    """
     if not style_meta:
         return SYSTEM_STYLES["default"]["system"]
 
@@ -77,47 +68,46 @@ def resolve_style(style_meta: Optional[dict], user_id: int) -> str:
 
     return SYSTEM_STYLES["default"]["system"]
 
+# --------------------------------
+# Commands
+# --------------------------------
 
-# -------------------------------------------------
-# commands
-# -------------------------------------------------
 @dp.message(CommandStart())
 async def start(message: Message):
     await message.answer(
-        "Я живой 🤍\n"
+        "Я жив 🤍\n"
         "Каждая тема — отдельный диалог.\n"
-        "Можно выбрать стиль через /style"
+        "Команды:\n"
+        "/style — список и установка стилей\n"
+        "/newstyle — создать свой стиль\n"
+        "/stats — статистика"
     )
-
 
 @dp.message(Command("reset"))
 async def reset_chat(message: Message):
     key = get_dialog_key(message)
     chat_store.clear(key)
-    await message.answer("Контекст этого диалога сброшен ✨")
-
+    await message.answer("Контекст этой темы сброшен ✨")
 
 @dp.message(Command("style"))
 async def style_command(message: Message):
     parts = message.text.split(maxsplit=1)
 
-    # список
+    # show list
     if len(parts) == 1:
         text = "*Стили:*\n\n"
         for k, v in SYSTEM_STYLES.items():
             text += f"• `{k}` — {v['title']}\n"
-
         user_styles = chat_store.get_user_styles(message.from_user.id)
         if user_styles:
             text += "\n*Твои стили:*\n"
             for name in user_styles:
                 text += f"• `{name}`\n"
-
         text += "\nПример:\n`/style creative`"
         await message.answer(text)
         return
 
-    # установка
+    # set
     name = parts[1].strip()
     key = get_dialog_key(message)
 
@@ -126,9 +116,7 @@ async def style_command(message: Message):
             key,
             style={"type": "system", "id": name}
         )
-        await message.answer(
-            f"Стиль установлен: *{SYSTEM_STYLES[name]['title']}*"
-        )
+        await message.answer(f"Стиль установлен: *{SYSTEM_STYLES[name]['title']}*")
         return
 
     user_styles = chat_store.get_user_styles(message.from_user.id)
@@ -142,7 +130,6 @@ async def style_command(message: Message):
 
     await message.answer("Такого стиля нет 😌")
 
-
 @dp.message(Command("newstyle"))
 async def new_style(message: Message):
     await message.answer(
@@ -152,10 +139,20 @@ async def new_style(message: Message):
         "`sarcastic | Ты язвительный, умный и сухо шутишь`"
     )
 
+@dp.message(Command("stats"))
+async def stats(message: Message):
+    stats = chat_store.get_stats()
+    await message.answer(
+        f"📊 *Статистика по памяти*\n\n"
+        f"Ключей диалогов: {stats['dialogs']}\n"
+        f"Пользователей: {stats['users']}\n"
+        f"Всего сообщений: {stats['messages']}"
+    )
 
-# -------------------------------------------------
-# messages
-# -------------------------------------------------
+# --------------------------------
+# Message Handler
+# --------------------------------
+
 @dp.message()
 async def handle_message(message: Message):
     key = get_dialog_key(message)
@@ -166,16 +163,32 @@ async def handle_message(message: Message):
         f"user={message.from_user.id}"
     )
 
+    # ensure dialog exists
+    if not chat_store.exists(key):
+        chat_store.create_dialog(key, message.from_user.id)
+
+    # get style
     meta = chat_store.get_meta(key)
-    system_prompt = resolve_style(
-        meta.get("style"),
-        message.from_user.id
+    system_prompt = resolve_style(meta.get("style"), message.from_user.id)
+
+    # history for LLM
+    history = chat_store.get_messages(key)
+
+    # prepare messages with system prompt first
+    all_messages = (
+        [{"role": "system", "content": system_prompt}] +
+        history +
+        [{"role": "user", "content": message.text}]
     )
 
+    # call model
     response = GenerationService.generate(
-        text=message.text,
-        chat_id=key,
-        system_prompt=system_prompt
+        messages=all_messages
     )
 
-    await message.answer(response)
+    # save to memory
+    chat_store.add_message(key, "user", message.text)
+    chat_store.add_message(key, "assistant", response.choices[0].message.content)
+
+    # reply
+    await message.answer(response.choices[0].message.content)
