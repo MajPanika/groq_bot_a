@@ -96,6 +96,13 @@ async def reset_chat(message: Message):
     chat_store.clear(key)
     await message.answer("Контекст этого диалога сброшен ✨")
 
+@dp.message(Command("stats"))
+async def stats(message: types.Message):
+    dialogs = chat_store.list_by_chat(message.chat.id)
+    await message.answer(
+        f"📊 Статистика:\n"
+        f"Тем: {len(dialogs)} / {MAX_TOPICS_PER_CHAT}"
+    )
 
 @dp.message(Command("style"))
 async def style_command(message: Message):
