@@ -1,9 +1,9 @@
 import logging
-import time
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
+from aiogram.enums import ParseMode
 
 from config import TELEGRAM_TOKEN
 from generation_service import GenerationService
@@ -11,120 +11,143 @@ from memory_store import chat_store
 
 logger = logging.getLogger("telegram")
 
-# -------- settings --------
+# --- настройки ---
+MAX_TOPICS_PER_CHAT = 20
+DEFAULT_STYLE = "default"
 
-MAX_TOPICS_PER_CHAT = 10
-TOPIC_TTL_SECONDS = 60 * 60 * 24 * 14  # 14 days
-
-# -------- bot init --------
+BUILTIN_STYLES = {
+    "default": {
+        "title": "Обычный",
+        "system": "Ты полезный и дружелюбный ассистент."
+    },
+    "creative": {
+        "title": "Креативный",
+        "system": "Ты креативный, образный и смелый в ответах."
+    },
+    "coder": {
+        "title": "Программист",
+        "system": "Ты опытный разработчик, отвечаешь чётко и по делу."
+    }
+}
 
 bot = Bot(
     token=TELEGRAM_TOKEN,
     parse_mode=ParseMode.MARKDOWN
 )
-
 dp = Dispatcher()
 
 
-# -------- helpers --------
+# --- utils ---
+def get_dialog_key(message: types.Message) -> tuple:
+    return (
+        message.chat.id,
+        message.message_thread_id  # None для обычных чатов
+    )
 
-def get_thread_id(message: types.Message) -> str:
-    return str(message.message_thread_id or "main")
 
-
-def get_context_key(chat_id: int, thread_id: str) -> str:
-    return f"{chat_id}:{thread_id}"
+def ensure_dialog_exists(key: tuple):
+    if not chat_store.exists(key):
+        chat_store.create(
+            key=key,
+            meta={
+                "style": DEFAULT_STYLE,
+                "created_at": datetime.utcnow(),
+                "last_used": datetime.utcnow(),
+            }
+        )
 
 
 def cleanup_old_topics(chat_id: int):
-    """Удаляем старые темы по TTL"""
-    now = time.time()
+    dialogs = chat_store.list_by_chat(chat_id)
 
-    for key, meta in list(chat_store.meta.items()):
-        if not key.startswith(f"{chat_id}:"):
-            continue
-
-        if now - meta["last_used"] > TOPIC_TTL_SECONDS:
-            chat_store.clear(key)
-            logger.debug(f"Auto-cleaned old topic {key}")
-
-
-def enforce_topic_limit(chat_id: int):
-    """Ограничиваем количество активных тем"""
-    topics = [
-        (key, meta["last_used"])
-        for key, meta in chat_store.meta.items()
-        if key.startswith(f"{chat_id}:")
-    ]
-
-    if len(topics) <= MAX_TOPICS_PER_CHAT:
+    if len(dialogs) <= MAX_TOPICS_PER_CHAT:
         return
 
-    topics.sort(key=lambda x: x[1])  # старые первые
+    dialogs.sort(key=lambda d: d["meta"].get("last_used"))
+    to_delete = dialogs[:-MAX_TOPICS_PER_CHAT]
 
-    for key, _ in topics[:-MAX_TOPICS_PER_CHAT]:
-        chat_store.clear(key)
-        logger.debug(f"Removed topic by limit: {key}")
+    for d in to_delete:
+        chat_store.delete(d["key"])
+        logger.info(f"Old dialog removed: {d['key']}")
 
 
-# -------- commands --------
-
+# --- handlers ---
 @dp.message(CommandStart())
 async def start(message: types.Message):
     await message.answer(
-        "Я живой 🤍\n"
-        "Каждая тема — отдельный диалог.\n\n"
-        "/reset — сброс текущей темы\n"
-        "/stats — статистика тем"
+        "Я жив 🤍\n"
+        "Каждая тема — отдельный диалог.\n"
+        "Команды: /style, /reset, /stats"
     )
 
 
 @dp.message(Command("reset"))
 async def reset_chat(message: types.Message):
-    thread_id = get_thread_id(message)
-    context_key = get_context_key(message.chat.id, thread_id)
-
-    chat_store.clear(context_key)
-
+    key = get_dialog_key(message)
+    chat_store.clear(key)
     await message.answer("Контекст этой темы сброшен ✨")
+
+
+@dp.message(Command("style"))
+async def choose_style(message: types.Message):
+    text = "Доступные стили:\n\n"
+    for k, v in BUILTIN_STYLES.items():
+        text += f"• `{k}` — {v['title']}\n"
+
+    text += "\nПример:\n`/style creative`"
+    await message.answer(text)
 
 
 @dp.message(Command("stats"))
 async def stats(message: types.Message):
-    chat_id = message.chat.id
-
-    topics = [
-        key for key in chat_store.meta.keys()
-        if key.startswith(f"{chat_id}:")
-    ]
-
+    dialogs = chat_store.list_by_chat(message.chat.id)
     await message.answer(
-        f"📊 *Статистика*\n\n"
-        f"Активных тем: {len(topics)} / {MAX_TOPICS_PER_CHAT}\n"
-        f"TTL темы: {TOPIC_TTL_SECONDS // 86400} дней"
+        f"📊 Статистика:\n"
+        f"Тем: {len(dialogs)} / {MAX_TOPICS_PER_CHAT}"
     )
 
 
-# -------- main handler --------
+@dp.message(Command("style"))
+async def set_style(message: types.Message):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        return
+
+    style_id = parts[1].strip()
+    if style_id not in BUILTIN_STYLES:
+        await message.answer("Такого стиля нет 😌")
+        return
+
+    key = get_dialog_key(message)
+    ensure_dialog_exists(key)
+
+    chat_store.update_meta(key, style=style_id)
+    await message.answer(f"Стиль установлен: *{BUILTIN_STYLES[style_id]['title']}*")
+
 
 @dp.message()
 async def handle_message(message: types.Message):
-    chat_id = message.chat.id
-    thread_id = get_thread_id(message)
-    context_key = get_context_key(chat_id, thread_id)
+    key = get_dialog_key(message)
+    ensure_dialog_exists(key)
 
-    cleanup_old_topics(chat_id)
-    enforce_topic_limit(chat_id)
+    meta = chat_store.get_meta(key)
+    meta["last_used"] = datetime.utcnow()
+
+    cleanup_old_topics(message.chat.id)
+
+    style_id = meta.get("style", DEFAULT_STYLE)
+    style = BUILTIN_STYLES.get(style_id, BUILTIN_STYLES["default"])
 
     logger.debug(
-        f"chat_id={chat_id} "
-        f"thread_id={thread_id} "
-        f"context_key={context_key}"
+        f"chat_id={message.chat.id} "
+        f"thread_id={message.message_thread_id} "
+        f"style={style_id}"
     )
 
     response = GenerationService.generate(
         text=message.text,
-        chat_id=context_key
+        chat_id=key,
+        system_prompt=style["system"]
     )
 
     await message.answer(response)
