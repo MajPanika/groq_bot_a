@@ -1,39 +1,24 @@
 import logging
-from typing import Optional
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.enums import ParseMode
 
 from config import TELEGRAM_TOKEN
 from generation_service import GenerationService
 from memory_store import chat_store
 
-
-# -------------------------------------------------
-# logging
-# -------------------------------------------------
 logger = logging.getLogger("telegram")
 
+# --- настройки ---
+MAX_TOPICS_PER_CHAT = 20
+DEFAULT_STYLE = "default"
 
-# -------------------------------------------------
-# bot / dispatcher
-# -------------------------------------------------
-bot = Bot(
-    token=TELEGRAM_TOKEN,
-    parse_mode=ParseMode.MARKDOWN
-)
-dp = Dispatcher()
-
-
-# -------------------------------------------------
-# styles
-# -------------------------------------------------
-SYSTEM_STYLES = {
+BUILTIN_STYLES = {
     "default": {
         "title": "Обычный",
-        "system": "Ты полезный, дружелюбный и вменяемый ассистент."
+        "system": "Ты полезный и дружелюбный ассистент."
     },
     "creative": {
         "title": "Креативный",
@@ -45,56 +30,73 @@ SYSTEM_STYLES = {
     }
 }
 
-
-def get_dialog_key(message: Message) -> str:
-    """
-    Уникальный ключ диалога:
-    chat_id + thread_id (если есть)
-    """
-    thread_id = message.message_thread_id or 0
-    return f"{message.chat.id}:{thread_id}"
+bot = Bot(
+    token=TELEGRAM_TOKEN,
+    parse_mode=ParseMode.MARKDOWN
+)
+dp = Dispatcher()
 
 
-def resolve_style(style_meta: Optional[dict], user_id: int) -> str:
-    """
-    Возвращает system prompt по метаданным стиля
-    """
-    if not style_meta:
-        return SYSTEM_STYLES["default"]["system"]
+# --- utils ---
+def get_dialog_key(message: types.Message) -> tuple:
+    return (
+        message.chat.id,
+        message.message_thread_id  # None для обычных чатов
+    )
 
-    if style_meta["type"] == "system":
-        return SYSTEM_STYLES.get(
-            style_meta["id"],
-            SYSTEM_STYLES["default"]
-        )["system"]
 
-    if style_meta["type"] == "custom":
-        user_styles = chat_store.get_user_styles(user_id)
-        return user_styles.get(
-            style_meta["id"],
-            SYSTEM_STYLES["default"]["system"]
+def ensure_dialog_exists(key: tuple):
+    if not chat_store.exists(key):
+        chat_store.create(
+            key=key,
+            meta={
+                "style": DEFAULT_STYLE,
+                "created_at": datetime.utcnow(),
+                "last_used": datetime.utcnow(),
+            }
         )
 
-    return SYSTEM_STYLES["default"]["system"]
+
+def cleanup_old_topics(chat_id: int):
+    dialogs = chat_store.list_by_chat(chat_id)
+
+    if len(dialogs) <= MAX_TOPICS_PER_CHAT:
+        return
+
+    dialogs.sort(key=lambda d: d["meta"].get("last_used"))
+    to_delete = dialogs[:-MAX_TOPICS_PER_CHAT]
+
+    for d in to_delete:
+        chat_store.delete(d["key"])
+        logger.info(f"Old dialog removed: {d['key']}")
 
 
-# -------------------------------------------------
-# commands
-# -------------------------------------------------
+# --- handlers ---
 @dp.message(CommandStart())
-async def start(message: Message):
+async def start(message: types.Message):
     await message.answer(
-        "Я живой 🤍\n"
+        "Я жив 🤍\n"
         "Каждая тема — отдельный диалог.\n"
-        "Можно выбрать стиль через /style"
+        "Команды: /style, /reset, /stats"
     )
 
 
 @dp.message(Command("reset"))
-async def reset_chat(message: Message):
+async def reset_chat(message: types.Message):
     key = get_dialog_key(message)
     chat_store.clear(key)
-    await message.answer("Контекст этого диалога сброшен ✨")
+    await message.answer("Контекст этой темы сброшен ✨")
+
+
+@dp.message(Command("style"))
+async def choose_style(message: types.Message):
+    text = "Доступные стили:\n\n"
+    for k, v in BUILTIN_STYLES.items():
+        text += f"• `{k}` — {v['title']}\n"
+
+    text += "\nПример:\n`/style creative`"
+    await message.answer(text)
+
 
 @dp.message(Command("stats"))
 async def stats(message: types.Message):
@@ -104,85 +106,48 @@ async def stats(message: types.Message):
         f"Тем: {len(dialogs)} / {MAX_TOPICS_PER_CHAT}"
     )
 
+
 @dp.message(Command("style"))
-async def style_command(message: Message):
+async def set_style(message: types.Message):
     parts = message.text.split(maxsplit=1)
-
-    # список
-    if len(parts) == 1:
-        text = "*Стили:*\n\n"
-        for k, v in SYSTEM_STYLES.items():
-            text += f"• `{k}` — {v['title']}\n"
-
-        user_styles = chat_store.get_user_styles(message.from_user.id)
-        if user_styles:
-            text += "\n*Твои стили:*\n"
-            for name in user_styles:
-                text += f"• `{name}`\n"
-
-        text += "\nПример:\n`/style creative`"
-        await message.answer(text)
+    if len(parts) < 2:
         return
 
-    # установка
-    name = parts[1].strip()
+    style_id = parts[1].strip()
+    if style_id not in BUILTIN_STYLES:
+        await message.answer("Такого стиля нет 😌")
+        return
+
     key = get_dialog_key(message)
+    ensure_dialog_exists(key)
 
-    if name in SYSTEM_STYLES:
-        chat_store.update_meta(
-            key,
-            style={"type": "system", "id": name}
-        )
-        await message.answer(
-            f"Стиль установлен: *{SYSTEM_STYLES[name]['title']}*"
-        )
-        return
-
-    user_styles = chat_store.get_user_styles(message.from_user.id)
-    if name in user_styles:
-        chat_store.update_meta(
-            key,
-            style={"type": "custom", "id": name}
-        )
-        await message.answer(f"Применён твой стиль: *{name}*")
-        return
-
-    await message.answer("Такого стиля нет 😌")
+    chat_store.update_meta(key, style=style_id)
+    await message.answer(f"Стиль установлен: *{BUILTIN_STYLES[style_id]['title']}*")
 
 
-@dp.message(Command("newstyle"))
-async def new_style(message: Message):
-    await message.answer(
-        "Создание стиля:\n\n"
-        "`Название | system prompt`\n\n"
-        "Пример:\n"
-        "`sarcastic | Ты язвительный, умный и сухо шутишь`"
-    )
-
-
-# -------------------------------------------------
-# messages
-# -------------------------------------------------
 @dp.message()
-async def handle_message(message: Message):
+async def handle_message(message: types.Message):
     key = get_dialog_key(message)
-
-    logger.info(
-        f"chat={message.chat.id} "
-        f"thread={message.message_thread_id} "
-        f"user={message.from_user.id}"
-    )
+    ensure_dialog_exists(key)
 
     meta = chat_store.get_meta(key)
-    system_prompt = resolve_style(
-        meta.get("style"),
-        message.from_user.id
+    meta["last_used"] = datetime.utcnow()
+
+    cleanup_old_topics(message.chat.id)
+
+    style_id = meta.get("style", DEFAULT_STYLE)
+    style = BUILTIN_STYLES.get(style_id, BUILTIN_STYLES["default"])
+
+    logger.debug(
+        f"chat_id={message.chat.id} "
+        f"thread_id={message.message_thread_id} "
+        f"style={style_id}"
     )
 
     response = GenerationService.generate(
         text=message.text,
         chat_id=key,
-        system_prompt=system_prompt
+        system_prompt=style["system"]
     )
 
     await message.answer(response)
