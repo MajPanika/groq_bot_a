@@ -163,32 +163,30 @@ async def handle_message(message: Message):
         f"user={message.from_user.id}"
     )
 
-    # ensure dialog exists
     if not chat_store.exists(key):
         chat_store.create_dialog(key, message.from_user.id)
 
-    # get style
     meta = chat_store.get_meta(key)
     system_prompt = resolve_style(meta.get("style"), message.from_user.id)
 
-    # history for LLM
     history = chat_store.get_messages(key)
 
-    # prepare messages with system prompt first
-    all_messages = (
-        [{"role": "system", "content": system_prompt}] +
-        history +
-        [{"role": "user", "content": message.text}]
-    )
+    # 🧠 собираем текст вручную
+    prompt = system_prompt + "\n\n"
 
-    # call model
+    for m in history:
+        role = "User" if m["role"] == "user" else "Assistant"
+        prompt += f"{role}: {m['content']}\n"
+
+    prompt += f"User: {message.text}\nAssistant:"
+
+    # 🔥 ВАЖНО: вызываем generate ТОЛЬКО так
     response = GenerationService.generate(
-        messages=all_messages
+        text=prompt,
+        chat_id=key
     )
 
-    # save to memory
     chat_store.add_message(key, "user", message.text)
-    chat_store.add_message(key, "assistant", response.choices[0].message.content)
+    chat_store.add_message(key, "assistant", response)
 
-    # reply
-    await message.answer(response.choices[0].message.content)
+    await message.answer(response)
