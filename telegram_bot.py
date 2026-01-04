@@ -1,34 +1,23 @@
 import logging
 from typing import Optional
-
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
-
 from memory_store import MemoryStore
 from generation_service import GenerationService
 
 logger = logging.getLogger(__name__)
 
 class TelegramBot:
-    def __init__(
-        self,
-        token: str,
-        memory_store: MemoryStore,
-        generation_service: GenerationService,
-    ):
+    def __init__(self, token: str, memory_store: MemoryStore, generation_service: GenerationService):
         self.bot = Bot(token=token)
         self.dp = Dispatcher()
-
         self.memory_store = memory_store
         self.generation_service = generation_service
 
-        # commands
         self.dp.message.register(self.cmd_reset, Command("reset"))
         self.dp.message.register(self.cmd_mmode, Command("mmode"))
         self.dp.message.register(self.cmd_style, Command("style"))
-
-        # messages
         self.dp.message.register(self.on_message)
 
     @staticmethod
@@ -55,7 +44,6 @@ class TelegramBot:
             current = self.memory_store.get_style(chat_id, thread_id)
             await message.answer(f"🎨 Текущий стиль: `{current}`", parse_mode="Markdown")
             return
-
         new_style = parts[1].strip()
         self.memory_store.set_style(chat_id, thread_id, new_style)
         await message.answer(f"🎨 Стиль установлен: `{new_style}`", parse_mode="Markdown")
@@ -63,21 +51,14 @@ class TelegramBot:
     async def on_message(self, message: Message):
         if not message.text:
             return
-
         chat_id, thread_id = self._get_ids(message)
         user_text = message.text
-
         try:
-            reply = self.generation_service.generate(
-                chat_id=chat_id,
-                thread_id=thread_id,
-                user_text=user_text,
-            )
+            reply = self.generation_service.generate(chat_id, thread_id, user_text)
         except Exception as e:
             logger.exception("Generation failed")
             await message.answer("⚠️ Ошибка генерации ответа.")
             return
-
         await message.answer(reply)
 
     def run(self):
