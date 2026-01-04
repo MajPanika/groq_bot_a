@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
-DialogKey = Tuple[int, Optional[int]]  # (chat_id, thread_id)
+DialogKey = Tuple[int, Optional[int]]
 
 
 class InMemoryChatStore:
@@ -13,11 +13,16 @@ class InMemoryChatStore:
 
     # ---------- helpers ----------
 
-    def _key(self, chat_id: int, thread_id: Optional[int]) -> DialogKey:
+    def _normalize_key(
+        self,
+        chat_id: Union[int, DialogKey],
+        thread_id: Optional[int] = None,
+    ) -> DialogKey:
+        if isinstance(chat_id, tuple):
+            return chat_id
         return chat_id, thread_id
 
-    def _get(self, chat_id: int, thread_id: Optional[int]) -> dict:
-        key = self._key(chat_id, thread_id)
+    def _get(self, key: DialogKey) -> dict:
         if key not in self.dialogs:
             self.dialogs[key] = {
                 "style": "default",
@@ -35,67 +40,71 @@ class InMemoryChatStore:
 
     # ---------- style ----------
 
-    def set_style(self, chat_id: int, thread_id: Optional[int], style: str):
-        self._get(chat_id, thread_id)["style"] = style
+    def set_style(self, chat_id, thread_id=None, style: str = "default"):
+        key = self._normalize_key(chat_id, thread_id)
+        self._get(key)["style"] = style
 
-    def get_style(self, chat_id: int, thread_id: Optional[int]) -> str:
-        return self._get(chat_id, thread_id)["style"]
+    def get_style(self, chat_id, thread_id=None) -> str:
+        key = self._normalize_key(chat_id, thread_id)
+        return self._get(key)["style"]
 
     # ---------- memory mode ----------
 
-    def toggle_memory_mode(self, chat_id: int, thread_id: Optional[int]) -> bool:
-        dialog = self._get(chat_id, thread_id)
+    def toggle_memory_mode(self, chat_id, thread_id=None) -> bool:
+        key = self._normalize_key(chat_id, thread_id)
+        dialog = self._get(key)
         dialog["memory"] = not dialog["memory"]
         return dialog["memory"]
 
-    def is_memory_enabled(self, chat_id: int, thread_id: Optional[int]) -> bool:
-        return self._get(chat_id, thread_id)["memory"]
+    def is_memory_enabled(self, chat_id, thread_id=None) -> bool:
+        key = self._normalize_key(chat_id, thread_id)
+        return self._get(key)["memory"]
 
-    # ---------- messages (ОБРАТНАЯ СОВМЕСТИМОСТЬ) ----------
+    # ---------- messages (backward compatible) ----------
 
-    def add_user_message(
-        self,
-        chat_id: int,
-        thread_id: Optional[int],
-        text: Optional[str] = None,
-    ):
+    def add_user_message(self, chat_id, thread_id=None, text: Optional[str] = None):
         if not text:
             return
-        dialog = self._get(chat_id, thread_id)
+        key = self._normalize_key(chat_id, thread_id)
+        dialog = self._get(key)
         if not dialog["memory"]:
             return
         dialog["messages"].append({"role": "user", "content": text})
         self._trim(dialog)
 
-    def add_bot_message(
-        self,
-        chat_id: int,
-        thread_id: Optional[int],
-        text: Optional[str] = None,
-    ):
+    def add_bot_message(self, chat_id, thread_id=None, text: Optional[str] = None):
         if not text:
             return
-        dialog = self._get(chat_id, thread_id)
+        key = self._normalize_key(chat_id, thread_id)
+        dialog = self._get(key)
         if not dialog["memory"]:
             return
         dialog["messages"].append({"role": "assistant", "content": text})
         self._trim(dialog)
 
-    def get_dialog(self, chat_id: int, thread_id: Optional[int]) -> List[dict]:
-        dialog = self._get(chat_id, thread_id)
+    # ---------- dialog access ----------
+
+    def get_dialog(self, chat_id, thread_id=None) -> List[dict]:
+        key = self._normalize_key(chat_id, thread_id)
+        dialog = self._get(key)
         if not dialog["memory"]:
             return []
         return list(dialog["messages"])
 
-    # ---------- reset ----------
+    # ---------- reset (ALL ALIASES) ----------
 
-    def clear_dialog(self, chat_id: int, thread_id: Optional[int]):
-        self.dialogs.pop(self._key(chat_id, thread_id), None)
+    def clear(self, chat_id, thread_id=None):
+        key = self._normalize_key(chat_id, thread_id)
+        self.dialogs.pop(key, None)
+
+    def clear_dialog(self, chat_id, thread_id=None):
+        self.clear(chat_id, thread_id)
 
     # ---------- stats ----------
 
-    def stats(self, chat_id: int, thread_id: Optional[int]) -> str:
-        dialog = self._get(chat_id, thread_id)
+    def stats(self, chat_id, thread_id=None) -> str:
+        key = self._normalize_key(chat_id, thread_id)
+        dialog = self._get(key)
         return (
             f"🧠 Диалог\n"
             f"Стиль: {dialog['style']}\n"
@@ -104,5 +113,5 @@ class InMemoryChatStore:
         )
 
 
-# ❗️КРИТИЧЕСКИ ВАЖНО
+# ❗ ОБЯЗАТЕЛЬНО
 chat_store = InMemoryChatStore()
