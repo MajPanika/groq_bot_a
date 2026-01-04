@@ -1,192 +1,208 @@
+import asyncio
 import logging
 from datetime import datetime
-from typing import Optional
 
-from aiogram import Bot, Dispatcher, types
-from aiogram.enums import ParseMode
-from aiogram.filters import Command, CommandStart
+from aiogram import Bot, Dispatcher, Router
+from aiogram.filters import Command
 from aiogram.types import Message
 
-from config import TELEGRAM_TOKEN
 from generation_service import GenerationService
-from memory_store import chat_store
 
-# --------------------------------
-# Logger
-# --------------------------------
-logger = logging.getLogger("telegram")
+BOT_TOKEN = "YOUR_TELEGRAM_TOKEN"
+
 logging.basicConfig(level=logging.INFO)
 
-# --------------------------------
-# Bot/Dispatcher
-# --------------------------------
-bot = Bot(token=TELEGRAM_TOKEN, parse_mode=ParseMode.MARKDOWN)
-dp = Dispatcher()
+router = Router()
 
-# --------------------------------
-# Styles
-# --------------------------------
-SYSTEM_STYLES = {
-    "default": {
-        "title": "Обычный",
-        "system": "Ты полезный и дружелюбный ассистент."
-    },
-    "creative": {
-        "title": "Креативный",
-        "system": "Ты креативный, образный и смелый в ответах."
-    },
-    "coder": {
-        "title": "Программист",
-        "system": "Ты опытный разработчик, отвечаешь чётко и по делу."
-    }
+# ─────────────────────────────
+# Настройки
+# ─────────────────────────────
+
+MAX_MESSAGES_PER_DIALOG = 20
+
+STYLE_PROMPTS = {
+    "chat": "Ты дружелюбный, умный собеседник.",
+    "translator": "Ты профессиональный переводчик. Переводи только последний текст.",
+    "coder": "Ты опытный программист. Отвечай кратко и по делу.",
 }
 
-# --------------------------------
-# Helpers
-# --------------------------------
+# ─────────────────────────────
+# In-memory хранилище диалогов
+# key = (chat_id, thread_id)
+# ─────────────────────────────
 
-def get_dialog_key(message: Message) -> str:
-    thread_id = message.message_thread_id or 0
-    return f"{message.chat.id}:{thread_id}"
+dialogs: dict[tuple[int, int | None], dict] = {}
 
-def resolve_style(style_meta: Optional[dict], user_id: int) -> str:
-    if not style_meta:
-        return SYSTEM_STYLES["default"]["system"]
 
-    if style_meta["type"] == "system":
-        return SYSTEM_STYLES.get(
-            style_meta["id"],
-            SYSTEM_STYLES["default"]
-        )["system"]
+def dialog_key(message: Message) -> tuple[int, int | None]:
+    return message.chat.id, message.message_thread_id
 
-    if style_meta["type"] == "custom":
-        user_styles = chat_store.get_user_styles(user_id)
-        return user_styles.get(
-            style_meta["id"],
-            SYSTEM_STYLES["default"]["system"]
-        )
 
-    return SYSTEM_STYLES["default"]["system"]
+def get_dialog(message: Message) -> dict:
+    key = dialog_key(message)
+    now = datetime.utcnow()
 
-# --------------------------------
+    if key not in dialogs:
+        dialogs[key] = {
+            "messages": [],
+            "style": "chat",
+            "mmode": "history",  # history | stateless
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    return dialogs[key]
+
+
+# ─────────────────────────────
+# Utils
+# ─────────────────────────────
+
+def build_messages(dialog: dict, user_text: str) -> list[dict]:
+    system_msg = {
+        "role": "system",
+        "content": STYLE_PROMPTS.get(dialog["style"], STYLE_PROMPTS["chat"]),
+    }
+
+    if dialog["mmode"] == "stateless":
+        return [
+            system_msg,
+            {"role": "user", "content": user_text},
+        ]
+
+    history = dialog["messages"][-MAX_MESSAGES_PER_DIALOG * 2 :]
+
+    return [
+        system_msg,
+        *history,
+        {"role": "user", "content": user_text},
+    ]
+
+
+# ─────────────────────────────
 # Commands
-# --------------------------------
+# ─────────────────────────────
 
-@dp.message(CommandStart())
-async def start(message: Message):
+@router.message(Command("start"))
+async def start_cmd(message: Message):
     await message.answer(
-        "Я жив 🤍\n"
-        "Каждая тема — отдельный диалог.\n"
+        "Привет 🤍\n\n"
         "Команды:\n"
-        "/style — список и установка стилей\n"
-        "/newstyle — создать свой стиль\n"
+        "/style — текущий стиль\n"
+        "/style <name> — сменить стиль\n"
+        "/mmode — режим памяти\n"
+        "/reset — очистить диалог\n"
         "/stats — статистика"
     )
 
-@dp.message(Command("reset"))
-async def reset_chat(message: Message):
-    key = get_dialog_key(message)
-    chat_store.clear(key)
-    await message.answer("Контекст этой темы сброшен ✨")
 
-@dp.message(Command("style"))
-async def style_command(message: Message):
+@router.message(Command("style"))
+async def style_cmd(message: Message):
+    dialog = get_dialog(message)
     parts = message.text.split(maxsplit=1)
 
-    # show list
     if len(parts) == 1:
-        text = "*Стили:*\n\n"
-        for k, v in SYSTEM_STYLES.items():
-            text += f"• `{k}` — {v['title']}\n"
-        user_styles = chat_store.get_user_styles(message.from_user.id)
-        if user_styles:
-            text += "\n*Твои стили:*\n"
-            for name in user_styles:
-                text += f"• `{name}`\n"
-        text += "\nПример:\n`/style creative`"
-        await message.answer(text)
-        return
-
-    # set
-    name = parts[1].strip()
-    key = get_dialog_key(message)
-
-    if name in SYSTEM_STYLES:
-        chat_store.update_meta(
-            key,
-            style={"type": "system", "id": name}
+        await message.answer(
+            f"🎨 Текущий стиль: <b>{dialog['style']}</b>\n\n"
+            "Доступные стили:\n"
+            + "\n".join(f"• {k}" for k in STYLE_PROMPTS)
         )
-        await message.answer(f"Стиль установлен: *{SYSTEM_STYLES[name]['title']}*")
         return
 
-    user_styles = chat_store.get_user_styles(message.from_user.id)
-    if name in user_styles:
-        chat_store.update_meta(
-            key,
-            style={"type": "custom", "id": name}
+    style_name = parts[1].strip()
+    if style_name not in STYLE_PROMPTS:
+        await message.answer("❌ Неизвестный стиль")
+        return
+
+    dialog["style"] = style_name
+    dialog["updated_at"] = datetime.utcnow()
+
+    await message.answer(f"🎨 Стиль изменён на <b>{style_name}</b>")
+
+
+@router.message(Command("mmode"))
+async def mmode_cmd(message: Message):
+    dialog = get_dialog(message)
+
+    dialog["mmode"] = (
+        "stateless"
+        if dialog["mmode"] == "history"
+        else "history"
+    )
+    dialog["updated_at"] = datetime.utcnow()
+
+    await message.answer(
+        "🧠 Режим памяти изменён\n"
+        f"Теперь: <b>{dialog['mmode']}</b>"
+    )
+
+
+@router.message(Command("reset"))
+async def reset_cmd(message: Message):
+    dialog = get_dialog(message)
+
+    dialog["messages"].clear()
+    dialog["updated_at"] = datetime.utcnow()
+
+    await message.answer("♻️ Диалог очищен")
+
+
+@router.message(Command("stats"))
+async def stats_cmd(message: Message):
+    dialog = get_dialog(message)
+
+    await message.answer(
+        "📊 Статистика диалога:\n"
+        f"Сообщений: {len(dialog['messages'])}\n"
+        f"Стиль: {dialog['style']}\n"
+        f"Режим памяти: {dialog['mmode']}"
+    )
+
+
+# ─────────────────────────────
+# Main handler
+# ─────────────────────────────
+
+@router.message()
+async def message_handler(message: Message):
+    dialog = get_dialog(message)
+    user_text = message.text
+
+    messages = build_messages(dialog, user_text)
+
+    try:
+        response = GenerationService.generate(
+            messages=messages
         )
-        await message.answer(f"Применён твой стиль: *{name}*")
+    except Exception as e:
+        logging.exception("Generation error")
+        await message.answer("⚠️ Ошибка генерации")
         return
 
-    await message.answer("Такого стиля нет 😌")
+    answer = response["content"]
 
-@dp.message(Command("newstyle"))
-async def new_style(message: Message):
-    await message.answer(
-        "Создание стиля:\n\n"
-        "`Название | system prompt`\n\n"
-        "Пример:\n"
-        "`sarcastic | Ты язвительный, умный и сухо шутишь`"
-    )
+    await message.answer(answer)
 
-@dp.message(Command("stats"))
-async def stats(message: Message):
-    stats = chat_store.get_stats()
-    await message.answer(
-        f"📊 *Статистика по памяти*\n\n"
-        f"Ключей диалогов: {stats['dialogs']}\n"
-        f"Пользователей: {stats['users']}\n"
-        f"Всего сообщений: {stats['messages']}"
-    )
+    if dialog["mmode"] == "history":
+        dialog["messages"].extend([
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": answer},
+        ])
+        dialog["updated_at"] = datetime.utcnow()
 
-# --------------------------------
-# Message Handler
-# --------------------------------
 
-@dp.message()
-async def handle_message(message: Message):
-    key = get_dialog_key(message)
+# ─────────────────────────────
+# Entrypoint
+# ─────────────────────────────
 
-    logger.info(
-        f"chat={message.chat.id} "
-        f"thread={message.message_thread_id} "
-        f"user={message.from_user.id}"
-    )
+async def main():
+    bot = Bot(BOT_TOKEN)
+    dp = Dispatcher()
+    dp.include_router(router)
 
-    if not chat_store.exists(key):
-        chat_store.create_dialog(key, message.from_user.id)
+    logging.info("Бот запускается… 🤍")
+    await dp.start_polling(bot)
 
-    meta = chat_store.get_meta(key)
-    system_prompt = resolve_style(meta.get("style"), message.from_user.id)
 
-    history = chat_store.get_messages(key)
-
-    # 🧠 собираем текст вручную
-    prompt = system_prompt + "\n\n"
-
-    for m in history:
-        role = "User" if m["role"] == "user" else "Assistant"
-        prompt += f"{role}: {m['content']}\n"
-
-    prompt += f"User: {message.text}\nAssistant:"
-
-    # 🔥 ВАЖНО: вызываем generate ТОЛЬКО так
-    response = GenerationService.generate(
-        text=prompt,
-        chat_id=key
-    )
-
-    chat_store.add_message(key, "user", message.text)
-    chat_store.add_message(key, "assistant", response)
-
-    await message.answer(response)
+if __name__ == "__main__":
+    asyncio.run(main())
