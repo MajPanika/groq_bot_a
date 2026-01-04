@@ -1,208 +1,150 @@
-import asyncio
 import logging
 from datetime import datetime
 
-from aiogram import Bot, Dispatcher, Router
+from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.enums import ParseMode
 
+from config import TELEGRAM_TOKEN
 from generation_service import GenerationService
+from memory_store import chat_store
 
-BOT_TOKEN = "YOUR_TELEGRAM_TOKEN"
+
+# -------------------------------------------------------------------
+# logging
+# -------------------------------------------------------------------
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("telegram")
 
+
+# -------------------------------------------------------------------
+# bot / dispatcher / router
+# -------------------------------------------------------------------
+
+bot = Bot(
+    token=TELEGRAM_TOKEN,
+    parse_mode=ParseMode.MARKDOWN
+)
+
+dp = Dispatcher()
 router = Router()
-
-# ─────────────────────────────
-# Настройки
-# ─────────────────────────────
-
-MAX_MESSAGES_PER_DIALOG = 20
-
-STYLE_PROMPTS = {
-    "chat": "Ты дружелюбный, умный собеседник.",
-    "translator": "Ты профессиональный переводчик. Переводи только последний текст.",
-    "coder": "Ты опытный программист. Отвечай кратко и по делу.",
-}
-
-# ─────────────────────────────
-# In-memory хранилище диалогов
-# key = (chat_id, thread_id)
-# ─────────────────────────────
-
-dialogs: dict[tuple[int, int | None], dict] = {}
+dp.include_router(router)
 
 
-def dialog_key(message: Message) -> tuple[int, int | None]:
-    return message.chat.id, message.message_thread_id
+# -------------------------------------------------------------------
+# helpers
+# -------------------------------------------------------------------
+
+def dialog_key(message: types.Message) -> str:
+    """
+    Уникальный ключ диалога:
+    chat_id + thread_id (темы Telegram)
+    """
+    return f"{message.chat.id}:{message.message_thread_id or 0}"
 
 
-def get_dialog(message: Message) -> dict:
-    key = dialog_key(message)
-    now = datetime.utcnow()
-
-    if key not in dialogs:
-        dialogs[key] = {
-            "messages": [],
-            "style": "chat",
-            "mmode": "history",  # history | stateless
-            "created_at": now,
-            "updated_at": now,
-        }
-
-    return dialogs[key]
-
-
-# ─────────────────────────────
-# Utils
-# ─────────────────────────────
-
-def build_messages(dialog: dict, user_text: str) -> list[dict]:
-    system_msg = {
-        "role": "system",
-        "content": STYLE_PROMPTS.get(dialog["style"], STYLE_PROMPTS["chat"]),
-    }
-
-    if dialog["mmode"] == "stateless":
-        return [
-            system_msg,
-            {"role": "user", "content": user_text},
-        ]
-
-    history = dialog["messages"][-MAX_MESSAGES_PER_DIALOG * 2 :]
-
-    return [
-        system_msg,
-        *history,
-        {"role": "user", "content": user_text},
-    ]
-
-
-# ─────────────────────────────
-# Commands
-# ─────────────────────────────
+# -------------------------------------------------------------------
+# commands
+# -------------------------------------------------------------------
 
 @router.message(Command("start"))
-async def start_cmd(message: Message):
+async def start(message: types.Message):
     await message.answer(
-        "Привет 🤍\n\n"
-        "Команды:\n"
+        "Я живой 🤍\n"
+        "Напиши что-нибудь.\n\n"
         "/style — текущий стиль\n"
-        "/style <name> — сменить стиль\n"
         "/mmode — режим памяти\n"
-        "/reset — очистить диалог\n"
+        "/reset — сброс диалога\n"
         "/stats — статистика"
     )
 
 
-@router.message(Command("style"))
-async def style_cmd(message: Message):
-    dialog = get_dialog(message)
-    parts = message.text.split(maxsplit=1)
-
-    if len(parts) == 1:
-        await message.answer(
-            f"🎨 Текущий стиль: <b>{dialog['style']}</b>\n\n"
-            "Доступные стили:\n"
-            + "\n".join(f"• {k}" for k in STYLE_PROMPTS)
-        )
-        return
-
-    style_name = parts[1].strip()
-    if style_name not in STYLE_PROMPTS:
-        await message.answer("❌ Неизвестный стиль")
-        return
-
-    dialog["style"] = style_name
-    dialog["updated_at"] = datetime.utcnow()
-
-    await message.answer(f"🎨 Стиль изменён на <b>{style_name}</b>")
-
-
-@router.message(Command("mmode"))
-async def mmode_cmd(message: Message):
-    dialog = get_dialog(message)
-
-    dialog["mmode"] = (
-        "stateless"
-        if dialog["mmode"] == "history"
-        else "history"
-    )
-    dialog["updated_at"] = datetime.utcnow()
-
-    await message.answer(
-        "🧠 Режим памяти изменён\n"
-        f"Теперь: <b>{dialog['mmode']}</b>"
-    )
-
-
 @router.message(Command("reset"))
-async def reset_cmd(message: Message):
-    dialog = get_dialog(message)
-
-    dialog["messages"].clear()
-    dialog["updated_at"] = datetime.utcnow()
-
-    await message.answer("♻️ Диалог очищен")
+async def reset_chat(message: types.Message):
+    key = dialog_key(message)
+    chat_store.clear(key)
+    await message.answer("Контекст этого диалога сброшен ✨")
 
 
 @router.message(Command("stats"))
-async def stats_cmd(message: Message):
-    dialog = get_dialog(message)
+async def stats(message: types.Message):
+    key = dialog_key(message)
+    stats = chat_store.stats(key)
+
+    if not stats:
+        await message.answer("Статистика пуста")
+        return
 
     await message.answer(
-        "📊 Статистика диалога:\n"
-        f"Сообщений: {len(dialog['messages'])}\n"
-        f"Стиль: {dialog['style']}\n"
-        f"Режим памяти: {dialog['mmode']}"
+        f"📊 *Статистика диалога*\n"
+        f"Сообщений: {stats['messages']}\n"
+        f"Символов: {stats['chars']}\n"
+        f"Создан: {stats['created_at']}"
     )
 
 
-# ─────────────────────────────
-# Main handler
-# ─────────────────────────────
+@router.message(Command("mmode"))
+async def memory_mode_toggle(message: types.Message):
+    key = dialog_key(message)
+    mode = chat_store.toggle_memory_mode(key)
+
+    await message.answer(
+        "🧠 Режим памяти: *ВКЛ*" if mode else "🧠 Режим памяти: *ВЫКЛ*"
+    )
+
+
+@router.message(Command("style"))
+async def style_info(message: types.Message):
+    key = dialog_key(message)
+    style = chat_store.get_style(key)
+
+    await message.answer(
+        f"🎭 *Текущий стиль:*\n{style}\n\n"
+        "Чтобы задать новый стиль:\n"
+        "`/newstyle текст стиля`"
+    )
+
+
+@router.message(Command("newstyle"))
+async def new_style(message: types.Message):
+    key = dialog_key(message)
+    text = message.text.replace("/newstyle", "").strip()
+
+    if not text:
+        await message.answer("Опиши стиль после команды.")
+        return
+
+    chat_store.set_style(key, text)
+    await message.answer("✨ Новый стиль установлен")
+
+
+# -------------------------------------------------------------------
+# messages
+# -------------------------------------------------------------------
 
 @router.message()
-async def message_handler(message: Message):
-    dialog = get_dialog(message)
-    user_text = message.text
+async def handle_message(message: types.Message):
+    key = dialog_key(message)
 
-    messages = build_messages(dialog, user_text)
+    logger.info(
+        f"chat={message.chat.id} "
+        f"thread={message.message_thread_id} "
+        f"user={message.from_user.id}"
+    )
+
+    chat_store.add_user_message(key, message.text)
 
     try:
         response = GenerationService.generate(
-            messages=messages
+            dialog=chat_store.get_dialog(key),
+            system_prompt=chat_store.get_style(key),
+            memory_enabled=chat_store.memory_enabled(key)
         )
     except Exception as e:
-        logging.exception("Generation error")
-        await message.answer("⚠️ Ошибка генерации")
+        logger.exception("Generation error")
+        await message.answer("⚠️ Ошибка генерации, попробуй позже")
         return
 
-    answer = response["content"]
-
-    await message.answer(answer)
-
-    if dialog["mmode"] == "history":
-        dialog["messages"].extend([
-            {"role": "user", "content": user_text},
-            {"role": "assistant", "content": answer},
-        ])
-        dialog["updated_at"] = datetime.utcnow()
-
-
-# ─────────────────────────────
-# Entrypoint
-# ─────────────────────────────
-
-async def main():
-    bot = Bot(BOT_TOKEN)
-    dp = Dispatcher()
-    dp.include_router(router)
-
-    logging.info("Бот запускается… 🤍")
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    chat_store.add_bot_message(key, response)
+    await message.answer(response)
