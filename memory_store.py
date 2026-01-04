@@ -1,101 +1,125 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 import time
-from collections import OrderedDict
-from typing import Dict, List, Optional
+
+
+DialogKey = Tuple[int, Optional[int]]  # (chat_id, thread_id)
+
+
+@dataclass
+class Dialog:
+    style: str = "default"
+    memory_enabled: bool = True
+    messages: List[dict] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+    last_used: float = field(default_factory=time.time)
 
 
 class InMemoryChatStore:
-    def __init__(
-        self,
-        max_dialogs_per_user: int = 10,
-        max_messages_per_dialog: int = 50
-    ):
-        self.dialogs: Dict[str, dict] = {}
-        self.user_dialogs: Dict[int, OrderedDict] = {}
+    def __init__(self, max_messages: int = 20):
+        self._dialogs: Dict[DialogKey, Dialog] = {}
+        self.max_messages = max_messages
 
-        self.max_dialogs_per_user = max_dialogs_per_user
-        self.max_messages_per_dialog = max_messages_per_dialog
+    # ---------- core ----------
 
-    # -------------------------
-    # dialogs
-    # -------------------------
-    def exists(self, key: str) -> bool:
-        return key in self.dialogs
+    def _get_or_create(self, key: DialogKey) -> Dialog:
+        if key not in self._dialogs:
+            self._dialogs[key] = Dialog()
+        dialog = self._dialogs[key]
+        dialog.last_used = time.time()
+        return dialog
 
-    def create_dialog(self, key: str, user_id: int):
-        now = time.time()
+    def clear(self, key: DialogKey) -> None:
+        if key in self._dialogs:
+            del self._dialogs[key]
 
-        self.dialogs[key] = {
-            "messages": [],
-            "meta": {
-                "style": None,
-                "created_at": now,
-                "last_used": now,
-            }
-        }
+    # ---------- style ----------
 
-        dialogs = self.user_dialogs.setdefault(user_id, OrderedDict())
-        dialogs[key] = now
+    def set_style(self, key: DialogKey, style: str) -> None:
+        dialog = self._get_or_create(key)
+        dialog.style = style
 
-        self._enforce_dialog_limit(user_id)
+    def get_style(self, key: DialogKey) -> str:
+        dialog = self._get_or_create(key)
+        return dialog.style
 
-    def _enforce_dialog_limit(self, user_id: int):
-        dialogs = self.user_dialogs[user_id]
+    # ---------- memory mode ----------
 
-        while len(dialogs) > self.max_dialogs_per_user:
-            oldest_key, _ = dialogs.popitem(last=False)
-            self.dialogs.pop(oldest_key, None)
+    def toggle_memory_mode(self, key: DialogKey) -> bool:
+        dialog = self._get_or_create(key)
+        dialog.memory_enabled = not dialog.memory_enabled
+        return dialog.memory_enabled
 
-    # -------------------------
-    # messages
-    # -------------------------
-    def add_message(self, key: str, role: str, content: str):
-        dialog = self.dialogs[key]
-        dialog["messages"].append(
-            {"role": role, "content": content}
+    def memory_enabled(self, key: DialogKey) -> bool:
+        dialog = self._get_or_create(key)
+        return dialog.memory_enabled
+
+    # ---------- dialog ----------
+
+    def add_user_message(self, key: DialogKey, text: str) -> None:
+        dialog = self._get_or_create(key)
+        if not dialog.memory_enabled:
+            return
+
+        dialog.messages.append({
+            "role": "user",
+            "content": text
+        })
+        self._trim(dialog)
+
+    def add_bot_message(self, key: DialogKey, text: str) -> None:
+        dialog = self._get_or_create(key)
+        if not dialog.memory_enabled:
+            return
+
+        dialog.messages.append({
+            "role": "assistant",
+            "content": text
+        })
+        self._trim(dialog)
+
+    def get_dialog(self, key: DialogKey) -> List[dict]:
+        dialog = self._get_or_create(key)
+        if not dialog.memory_enabled:
+            return []
+        return list(dialog.messages)
+
+    def _trim(self, dialog: Dialog) -> None:
+        if len(dialog.messages) > self.max_messages:
+            dialog.messages = dialog.messages[-self.max_messages :]
+
+    # ---------- stats ----------
+
+    def stats(self, key: Optional[DialogKey] = None) -> str:
+        if key:
+            dialog = self._dialogs.get(key)
+            if not dialog:
+                return "Диалог не найден."
+
+            return (
+                f"🧠 Диалог\n"
+                f"Стиль: {dialog.style}\n"
+                f"Память: {'включена' if dialog.memory_enabled else 'выключена'}\n"
+                f"Сообщений в памяти: {len(dialog.messages)}"
+            )
+
+        return (
+            f"📊 Общая статистика\n"
+            f"Диалогов: {len(self._dialogs)}"
         )
 
-        dialog["meta"]["last_used"] = time.time()
+    # ---------- maintenance ----------
 
-        if len(dialog["messages"]) > self.max_messages_per_dialog:
-            dialog["messages"] = dialog["messages"][-self.max_messages_per_dialog :]
+    def cleanup_old(self, max_age_seconds: int) -> int:
+        now = time.time()
+        to_delete = [
+            key for key, dialog in self._dialogs.items()
+            if now - dialog.last_used > max_age_seconds
+        ]
 
-    def get_messages(self, key: str) -> List[dict]:
-        return self.dialogs[key]["messages"]
+        for key in to_delete:
+            del self._dialogs[key]
 
-    def clear(self, key: str):
-        if key in self.dialogs:
-            self.dialogs[key]["messages"] = []
-
-    # -------------------------
-    # meta
-    # -------------------------
-    def get_meta(self, key: str) -> dict:
-        return self.dialogs.get(key, {}).get("meta", {})
-
-    def update_meta(self, key: str, **kwargs):
-        if key not in self.dialogs:
-            return
-        self.dialogs[key]["meta"].update(kwargs)
-
-    # -------------------------
-    # styles
-    # -------------------------
-    def get_user_styles(self, user_id: int) -> Dict[str, str]:
-        # задел под будущее
-        return {}
-
-    # -------------------------
-    # stats
-    # -------------------------
-    def get_stats(self) -> dict:
-        return {
-            "dialogs": len(self.dialogs),
-            "users": len(self.user_dialogs),
-            "messages": sum(
-                len(d["messages"]) for d in self.dialogs.values()
-            ),
-        }
-
-
-# singleton
-chat_store = InMemoryChatStore()
+        return len(to_delete)
