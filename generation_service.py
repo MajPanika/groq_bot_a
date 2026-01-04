@@ -1,40 +1,78 @@
-import logging
+from typing import Optional, List, Dict
+
+from memory_store import MemoryStore
 from groq_client import GroqClient
-from memory_store import chat_store
-
-logger = logging.getLogger("generation")
-
-DEFAULT_MODEL = "llama-3.1-8b-instant"
+from config import STYLES
 
 
 class GenerationService:
+    def __init__(
+        self,
+        memory_store: MemoryStore,
+        groq_client: GroqClient,
+        max_history_messages: int = 20,
+    ):
+        self.memory_store = memory_store
+        self.groq = groq_client
+        self.max_history_messages = max_history_messages
 
-    @staticmethod
-    def generate(text: str, chat_id: int) -> str:
-        """
-        Генерация ответа через Groq с in-memory историей
-        """
-        # Получаем историю чата
-        history = chat_store.get_messages(chat_id)
+    def generate(
+        self,
+        chat_id: int,
+        thread_id: Optional[int],
+        user_text: str,
+    ) -> str:
+        # 1️⃣ сохранить сообщение пользователя
+        self.memory_store.add_user_message(chat_id, thread_id, user_text)
 
-        # Формируем сообщения для Groq
-        messages = history + [{"role": "user", "content": text}]
+        # 2️⃣ собрать контекст
+        messages = self._build_context(chat_id, thread_id, user_text)
 
-        # Генерация через Groq
-        response = GroqClient.generate(model=DEFAULT_MODEL, messages=messages)
+        # 3️⃣ запрос к модели
+        reply = self.groq.chat(messages)
 
-        # Сохраняем в память
-        chat_store.add_message(chat_id, "user", text)
-        chat_store.add_message(
-            chat_id, "assistant", response.choices[0].message.content
+        # 4️⃣ сохранить ответ ассистента
+        self.memory_store.add_assistant_message(chat_id, thread_id, reply)
+
+        return reply
+
+    # ---------- internals ----------
+
+    def _build_context(
+        self,
+        chat_id: int,
+        thread_id: Optional[int],
+        last_user_text: str,
+    ) -> List[Dict[str, str]]:
+        dialog = self.memory_store.get_dialog(chat_id, thread_id)
+
+        style_name = dialog["style"]
+        memory_mode = dialog["memory_mode"]
+
+        system_prompt = self._get_system_prompt(style_name)
+
+        context: List[Dict[str, str]] = [
+            {"role": "system", "content": system_prompt}
+        ]
+
+        if memory_mode:
+            history = dialog["messages"][:-1]  # всё кроме последнего user
+            if history:
+                # жёсткий лимит по количеству сообщений
+                history = history[-self.max_history_messages:]
+                context.extend(
+                    {"role": m["role"], "content": m["content"]}
+                    for m in history
+                )
+
+        # последнее сообщение пользователя — ВСЕГДА
+        context.append(
+            {"role": "user", "content": last_user_text}
         )
 
-        # Логируем токены
-        usage = response.usage
-        logger.info(
-            f"Tokens used: in={usage.prompt_tokens}, "
-            f"out={usage.completion_tokens}, "
-            f"total={usage.total_tokens}"
-        )
+        return context
 
-        return response.choices[0].message.content
+    def _get_system_prompt(self, style_name: str) -> str:
+        if style_name not in STYLES:
+            return STYLES["default"]
+        return STYLES[style_name]
