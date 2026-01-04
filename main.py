@@ -1,11 +1,9 @@
 import os
 from dotenv import load_dotenv
-
 from memory_store import MemoryStore
 from groq_client import GroqClient
 from generation_service import GenerationService
 from telegram_bot import TelegramBot
-from config import STYLES
 
 def main():
     load_dotenv()
@@ -20,19 +18,9 @@ def main():
 
     memory_store = MemoryStore()
     groq_client = GroqClient(api_key=groq_api_key)
+    generation_service = GenerationService(memory_store, groq_client, max_history_messages=20)
 
-    generation_service = GenerationService(
-        memory_store=memory_store,
-        groq_client=groq_client,
-        max_history_messages=20,
-    )
-
-    bot = TelegramBot(
-        token=telegram_token,
-        memory_store=memory_store,
-        generation_service=generation_service,
-    )
-
+    bot = TelegramBot(token=telegram_token, memory_store=memory_store, generation_service=generation_service)
     bot.run()
 
 if __name__ == "__main__":
